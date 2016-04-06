@@ -4,6 +4,10 @@
 #include <cstring>
 #include <ctime>
 #include <algorithm>
+#include <vector>
+#include <openssl/rsa.h>
+#include <openssl/engine.h>
+#include <openssl/pem.h>
 #include <iostream>
 #include <gmp.h>
 
@@ -11,6 +15,17 @@ using namespace std;
 
 namespace {
   gmp_randstate_t state;
+  constexpr size_t DEFAULT_KEY_LENGTH = 2048;
+  RSA *rsa_keys;
+  BIGNUM *e;
+/*
+  constexpr size_t KEY_GENERATION_ITERATIONS = 1;
+  constexpr size_t ENCRYPTION_ITERATIONS = 1;
+  constexpr size_t DECRYPTION_ITERATIONS = 1;
+*/
+  constexpr size_t KEY_GENERATION_ITERATIONS = 50;
+  constexpr size_t ENCRYPTION_ITERATIONS = 500000;
+  constexpr size_t DECRYPTION_ITERATIONS = 5000;
 }
 
 struct Error : public exception {
@@ -18,6 +33,16 @@ struct Error : public exception {
   Error(const char *what) : exception(), pwhat(what) {}
   virtual const char *what() { return pwhat; }
 };
+
+BIGNUM *mpz_to_bn(mpz_t n) {
+  size_t sz = ceil(mpz_sizeinbase(n, 2)/8);
+  unsigned char bytes[sz];
+  mpz_export(bytes, &sz, 1, 1, 0, 0, n);
+  BIGNUM *ret;
+  ret = BN_new();
+  return BN_bin2bn(bytes, sz, ret);
+}
+
 
 struct PrivateKey {
   typedef unique_ptr<PrivateKey> Ptr;
@@ -64,6 +89,21 @@ struct KeyPair {
   PrivateKey::Ptr GetPrivateKey() { return PrivateKey::New(n, d, p, q, dmp1, dmq1, iqmp); }
   mpz_t n, e, d, p, q, dmp1, dmq1, iqmp;
 };
+
+static KeyPair::Ptr gmp_keys;
+
+RSA *keypair_to_rsa(KeyPair::Ptr &keys) {
+  RSA *ret = RSA_new();
+  ret->n = mpz_to_bn(keys->n);
+  ret->e = mpz_to_bn(keys->e);
+  ret->d = mpz_to_bn(keys->d);
+  ret->p = mpz_to_bn(keys->p);
+  ret->q = mpz_to_bn(keys->q);
+  ret->dmp1 = mpz_to_bn(keys->dmp1);
+  ret->dmq1 = mpz_to_bn(keys->dmq1);
+  ret->iqmp = mpz_to_bn(keys->iqmp);
+  return ret;
+} 
 
 void get_random_prime(mpz_t rop, unsigned bits) {
   mpz_urandomb(rop, state, bits - 1);
@@ -160,7 +200,6 @@ string rsa_encrypt(PublicKey::Ptr key, const string& msg) {
     mpz_powm(z, z, key->e, key->n);
     mpz_export(out_cstr + i*minout + minout - (size_t) ceil((double) mpz_sizeinbase(z, 2)/8), &minout, 1, 1, 0, 0, z);
     minout = last_minout;
-    
   }
   mpz_clear(z);
   out.append(out_cstr, out_cstr_len);
@@ -169,7 +208,7 @@ string rsa_encrypt(PublicKey::Ptr key, const string& msg) {
   return out;
 }
 
-string rsa_decrypt(PrivateKey::Ptr key, const string& msg) throw() {
+string rsa_decrypt(PrivateKey::Ptr key, const string msg) throw() {
   size_t sz = msg.size();
   const char *str = msg.c_str();
   string *out = new string();
@@ -215,17 +254,83 @@ string rsa_decrypt(PrivateKey::Ptr key, const string& msg) throw() {
   return ret;
 }
 
+size_t encrypted_size(size_t len, size_t bits) {
+  size_t bytes = ceil((double) bits/8);
+  size_t inblksz = bytes - 1;
+  size_t blks = ceil((double) len/inblksz);
+  return blks*bytes;
+}
+
+size_t decrypted_size(size_t len, size_t bits) {
+  size_t bytes = ceil((double) bits/8);
+  size_t inblksz = bytes;
+  size_t blks = ceil((double) len/inblksz);
+  return blks*(bytes - 1);
+}
+
+template<size_t iterations> double benchmark(function<void(void)> fn) {
+  time_t start, end;
+  time(&start);
+  for (size_t i = 0; i < iterations; ++i) {
+    fn();
+  }
+  time(&end);
+  return abs(difftime(start, end));
+}
+
+const char msg_cstr[] = "\0Lorem ipsum dolor sit amet";
+
 int main(int argc, char **argv) {
   srand(time(0));
   gmp_randinit_default(state);
+  cout << "Benchmarking key generation..." << endl;
   gmp_randseed_ui(state, rand());
-  KeyPair::Ptr keys = generate_keys(512);
-  gmp_printf("n: %Zd\ne: %Zd\nd: %Zd\n", keys->n, keys->e, keys->d);
-  string msg = "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Etiam bibendum dolor eget leo aliquet interdum. Etiam a viverra mauris. Nullam sed magna lobortis, rutrum quam ut, imperdiet ligula. Etiam et neque semper, malesuada enim vitae, bibendum dui. Cras eget purus at ipsum mollis fringilla at eget nisl. Etiam sem nisl, ornare sit amet tellus ut, malesuada imperdiet purus. Nunc luctus cursus vulputate. Sed maximus odio mauris, accumsan commodo nisi porttitor sed. Nunc venenatis tortor augue, ac viverra nunc vehicula in. Morbi a est et lorem molestie vehicula. Phasellus sollicitudin, ante quis dapibus pellentesque, nibh augue cursus felis, auctor eleifend velit risus sit amet turpis.";
-  string ciphertext = rsa_encrypt(keys->GetPublicKey(), msg);
-  string plaintext = rsa_decrypt(keys->GetPrivateKey(), ciphertext);
-  cout << plaintext << endl;
+  double key_generation_time_libgmp = benchmark<KEY_GENERATION_ITERATIONS>([] {
+    gmp_keys = generate_keys(DEFAULT_KEY_LENGTH);
+  });
+  e = BN_new();
+  BN_dec2bn(&e, "65537");
+  rsa_keys = RSA_new();
+  double key_generation_time_openssl = benchmark<KEY_GENERATION_ITERATIONS>([] {
+    RSA_generate_key_ex(rsa_keys, DEFAULT_KEY_LENGTH, e, 0);
+  });
+  RSA_free(rsa_keys);
+  rsa_keys = keypair_to_rsa(gmp_keys);
+  //BN_print_fp(stdout, rsa_keys->n);
+  gmp_printf("n: %Zd\ne: %Zd\nd: %Zd\n", gmp_keys->n, gmp_keys->e, gmp_keys->d);
+  string msg;
+  msg.append(msg_cstr, sizeof(msg_cstr));
+  cout << "Key generation benchmark results:" << endl << "libgmp: " << key_generation_time_libgmp << endl << "openssl: " << key_generation_time_openssl << endl;
+  cout << "Benchmarking encryption..." << endl;
+  cout << "libgmp: " << benchmark<ENCRYPTION_ITERATIONS>([msg] {
+    rsa_encrypt(gmp_keys->GetPublicKey(), msg);
+  }) << endl;
+  string ciphertext = rsa_encrypt(gmp_keys->GetPublicKey(), msg);
+  size_t encsz = encrypted_size(msg.size(), DEFAULT_KEY_LENGTH);
+  size_t blksz = ceil((double) msg.size()/(DEFAULT_KEY_LENGTH/8))*(DEFAULT_KEY_LENGTH/8);
+  unsigned char plaintext[blksz];
+  memset(plaintext, 0, sizeof(plaintext));
+  memcpy(plaintext, msg.c_str(), msg.size());
+  unsigned char encrypted[encsz];
+  size_t decsz = decrypted_size(encsz, DEFAULT_KEY_LENGTH);
+  unsigned char decrypted[decsz];
+  cout << "openssl: " << benchmark<ENCRYPTION_ITERATIONS>([&encrypted, &plaintext, &msg, blksz] {
+    RSA_public_encrypt(blksz, plaintext, encrypted, rsa_keys, RSA_NO_PADDING);
+    ERR_print_errors_fp(stdout);
+/*
+    unsigned long err = ERR_get_error();
+    cout << err << endl;
+    const char *mesg = ERR_reason_error_string(err);
+    cout << mesg << endl; */
+  }) << endl;
+  cout << "Benchmarking decryption..." << endl;
+  cout << "libgmp: " << benchmark<DECRYPTION_ITERATIONS>([ciphertext] {
+    rsa_decrypt(gmp_keys->GetPrivateKey(), ciphertext);
+  }) << endl;
+  cout << "openssl: " << benchmark<DECRYPTION_ITERATIONS>([&encsz, &encrypted, &decrypted] {
+    RSA_private_decrypt(encsz, encrypted, decrypted, rsa_keys, RSA_NO_PADDING);
+  }) << endl;
+  //string plaintext = rsa_decrypt(gmp_keys->GetPrivateKey(), ciphertext);
   gmp_randclear(state);
   return 0;
 }
-
