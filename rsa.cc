@@ -18,13 +18,8 @@ namespace {
   constexpr size_t DEFAULT_KEY_LENGTH = 2048;
   RSA *rsa_keys;
   BIGNUM *e;
-/*
-  constexpr size_t KEY_GENERATION_ITERATIONS = 1;
-  constexpr size_t ENCRYPTION_ITERATIONS = 1;
-  constexpr size_t DECRYPTION_ITERATIONS = 1;
-*/
-  constexpr size_t KEY_GENERATION_ITERATIONS = 50;
-  constexpr size_t ENCRYPTION_ITERATIONS = 500000;
+  constexpr size_t KEY_GENERATION_ITERATIONS = 100;
+  constexpr size_t ENCRYPTION_ITERATIONS = 100000;
   constexpr size_t DECRYPTION_ITERATIONS = 5000;
 }
 
@@ -171,6 +166,37 @@ KeyPair::Ptr generate_keys(unsigned bits) {
   return KeyPair::New(n, e, d, p, q, dmp1, dmq1, iqmp);
 }
 
+static BN_CTX *ctx;
+
+size_t openssl_rsa_encrypt(size_t blksz, unsigned char *plaintext, unsigned char *encrypted, RSA *keys) {
+  size_t pad;
+  BIGNUM *m = BN_new();
+  BN_bin2bn(plaintext, blksz, m);
+  ctx = BN_CTX_new();
+  BN_mod_exp(m, m, keys->e, keys->n, ctx);
+  pad = blksz - BN_num_bytes(m);
+  memset(encrypted, 0, pad); 
+  BN_bn2bin(m, plaintext + pad);
+  return blksz;
+}
+
+size_t openssl_rsa_decrypt(size_t blksz, unsigned char *ciphertext, unsigned char *plaintext, RSA *keys) {
+
+  size_t pad;
+  BIGNUM *m = BN_new(), *m1 = BN_new(), *m2 = BN_new();
+  BN_bin2bn(ciphertext, blksz, m);
+  BN_mod_exp(m1, m, keys->dmp1, keys->p, ctx);
+  BN_mod_exp(m2, m, keys->dmq1, keys->q, ctx);
+  BN_sub(m1, m1, m2);
+  BN_mod_mul(m1, m1, keys->iqmp, keys->p, ctx);
+  BN_mul(m1, m1, keys->q, ctx);
+  BN_add(m, m1, m2);
+  pad = blksz - BN_num_bytes(m);
+  memset(plaintext, 0, pad); 
+  BN_bn2bin(m, plaintext + pad);
+  return blksz;
+}
+
 string rsa_encrypt(PublicKey::Ptr key, const string& msg) {
   size_t sz = msg.size();
   const char *str = msg.c_str();
@@ -281,6 +307,7 @@ template<size_t iterations> double benchmark(function<void(void)> fn) {
 const char msg_cstr[] = "\0Lorem ipsum dolor sit amet";
 
 int main(int argc, char **argv) {
+  ctx = BN_CTX_new();
   srand(time(0));
   gmp_randinit_default(state);
   cout << "Benchmarking key generation..." << endl;
@@ -296,7 +323,6 @@ int main(int argc, char **argv) {
   });
   RSA_free(rsa_keys);
   rsa_keys = keypair_to_rsa(gmp_keys);
-  //BN_print_fp(stdout, rsa_keys->n);
   gmp_printf("n: %Zd\ne: %Zd\nd: %Zd\n", gmp_keys->n, gmp_keys->e, gmp_keys->d);
   string msg;
   msg.append(msg_cstr, sizeof(msg_cstr));
@@ -316,12 +342,9 @@ int main(int argc, char **argv) {
   unsigned char decrypted[decsz];
   cout << "openssl: " << benchmark<ENCRYPTION_ITERATIONS>([&encrypted, &plaintext, &msg, blksz] {
     RSA_public_encrypt(blksz, plaintext, encrypted, rsa_keys, RSA_NO_PADDING);
-    ERR_print_errors_fp(stdout);
-/*
-    unsigned long err = ERR_get_error();
-    cout << err << endl;
-    const char *mesg = ERR_reason_error_string(err);
-    cout << mesg << endl; */
+  }) << endl;
+  cout << "openssl (custom): " << benchmark<ENCRYPTION_ITERATIONS>([&encrypted, &plaintext, &msg, blksz] {
+    openssl_rsa_encrypt(blksz, plaintext, encrypted, rsa_keys);
   }) << endl;
   cout << "Benchmarking decryption..." << endl;
   cout << "libgmp: " << benchmark<DECRYPTION_ITERATIONS>([ciphertext] {
@@ -330,7 +353,10 @@ int main(int argc, char **argv) {
   cout << "openssl: " << benchmark<DECRYPTION_ITERATIONS>([&encsz, &encrypted, &decrypted] {
     RSA_private_decrypt(encsz, encrypted, decrypted, rsa_keys, RSA_NO_PADDING);
   }) << endl;
-  //string plaintext = rsa_decrypt(gmp_keys->GetPrivateKey(), ciphertext);
+  cout << "openssl (custom): " << benchmark<DECRYPTION_ITERATIONS>([&encrypted, &decrypted, &msg, blksz] {
+    openssl_rsa_decrypt(blksz, encrypted, decrypted, rsa_keys);
+  }) << endl;
   gmp_randclear(state);
+  BN_CTX_free(ctx);
   return 0;
 }
