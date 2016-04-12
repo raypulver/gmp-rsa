@@ -96,7 +96,7 @@ PROGRAMS = $(bin_PROGRAMS)
 am_rsa_OBJECTS = rsa.$(OBJEXT)
 rsa_OBJECTS = $(am_rsa_OBJECTS)
 am__DEPENDENCIES_1 =
-rsa_DEPENDENCIES = $(am__DEPENDENCIES_1)
+rsa_DEPENDENCIES = $(am__DEPENDENCIES_1) $(am__DEPENDENCIES_1)
 AM_V_P = $(am__v_P_@AM_V@)
 am__v_P_ = $(am__v_P_@AM_DEFAULT_V@)
 am__v_P_0 = false
@@ -264,9 +264,9 @@ target_alias = @target_alias@
 top_build_prefix = @top_build_prefix@
 top_builddir = @top_builddir@
 top_srcdir = @top_srcdir@
-AM_CXXFLAGS = $(OPENSSL_CFLAGS) -std=c++0x
+AM_CXXFLAGS = $(OPENSSL_CFLAGS) $(CFLAGS) -std=c++0x
 rsa_SOURCES = rsa.cc
-rsa_LDADD = $(OPENSSL_LIBS) -lgmp
+rsa_LDADD = $(OPENSSL_LIBS) $(LDFLAGS) -lgmp
 all: all-am
 
 .SUFFIXES:
