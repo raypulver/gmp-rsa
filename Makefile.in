@@ -96,7 +96,8 @@ PROGRAMS = $(bin_PROGRAMS)
 am_rsa_OBJECTS = rsa.$(OBJEXT)
 rsa_OBJECTS = $(am_rsa_OBJECTS)
 am__DEPENDENCIES_1 =
-rsa_DEPENDENCIES = $(am__DEPENDENCIES_1) $(am__DEPENDENCIES_1)
+rsa_DEPENDENCIES = $(am__DEPENDENCIES_1) $(am__DEPENDENCIES_1) \
+	$(am__DEPENDENCIES_1)
 AM_V_P = $(am__v_P_@AM_V@)
 am__v_P_ = $(am__v_P_@AM_DEFAULT_V@)
 am__v_P_0 = false
@@ -204,8 +205,6 @@ LTLIBOBJS = @LTLIBOBJS@
 MAKEINFO = @MAKEINFO@
 MKDIR_P = @MKDIR_P@
 OBJEXT = @OBJEXT@
-OPENSSL_CFLAGS = @OPENSSL_CFLAGS@
-OPENSSL_LIBS = @OPENSSL_LIBS@
 PACKAGE = @PACKAGE@
 PACKAGE_BUGREPORT = @PACKAGE_BUGREPORT@
 PACKAGE_NAME = @PACKAGE_NAME@
@@ -252,6 +251,8 @@ localstatedir = @localstatedir@
 mandir = @mandir@
 mkdir_p = @mkdir_p@
 oldincludedir = @oldincludedir@
+openssl_CFLAGS = @openssl_CFLAGS@
+openssl_LIBS = @openssl_LIBS@
 pdfdir = @pdfdir@
 prefix = @prefix@
 program_transform_name = @program_transform_name@
@@ -264,9 +265,10 @@ target_alias = @target_alias@
 top_build_prefix = @top_build_prefix@
 top_builddir = @top_builddir@
 top_srcdir = @top_srcdir@
-AM_CXXFLAGS = $(OPENSSL_CFLAGS) $(CFLAGS) -std=c++0x
+libgmp_LIBS = -lgmp
+AM_CXXFLAGS = $(openssl_CFLAGS) $(libgmp_CFLAGS) $(CFLAGS) -std=c++0x
 rsa_SOURCES = rsa.cc
-rsa_LDADD = $(OPENSSL_LIBS) $(LDFLAGS) -lgmp
+rsa_LDADD = $(openssl_LIBS) $(libgmp_LIBS) $(LDFLAGS)
 all: all-am
 
 .SUFFIXES:

@@ -8,8 +8,11 @@
 #include <openssl/engine.h>
 #include <openssl/pem.h>
 #include <iostream>
+#include <fstream>
+#include <streambuf>
 #include <iomanip>
 #include <getopt.h>
+#include <libgen.h>
 #include <gmp.h>
 
 using namespace std;
@@ -18,16 +21,25 @@ namespace {
   gmp_randstate_t state;
   constexpr size_t DEFAULT_KEY_LENGTH = 2048;
   BIGNUM *e;
-  constexpr size_t KEY_GENERATION_ITERATIONS = 10;
-  constexpr size_t ENCRYPTION_ITERATIONS = 10;
-  constexpr size_t DECRYPTION_ITERATIONS = 10;
+  constexpr int BENCHMARK_ITERATIONS = 10;
+}
+
+static inline string& ltrim(string &s, char c) {
+  s.erase(s.begin(), find_if(s.begin(), s.end(), [c] (int ch) -> int {
+    return c != ch;
+  }));
+  return s;
 }
 
 static int key_size = DEFAULT_KEY_LENGTH;
 
 static struct option long_options[] = {
   {"size", optional_argument, 0, 's'},
-  {"keyout", optional_argument, 0, 'k'},
+  {"out", optional_argument, 0, 'o'},
+  {"key", optional_argument, 0, 'k'},
+  {"input", optional_argument, 0, 'i'},
+  {"silent", optional_argument, 0, 'x'},
+  {"iterations", optional_argument, 0, 'n'},
   {0, 0, 0, 0}
 };
 
@@ -44,6 +56,16 @@ BIGNUM *mpz_to_bn(mpz_t n) {
   BIGNUM *ret;
   ret = BN_new();
   return BN_bin2bn(bytes, sz, ret);
+}
+
+void bn_to_mpz(BIGNUM *n, mpz_t m) {
+  if (n) {
+    size_t sz = BN_num_bytes(n);
+    unsigned char bytes[sz];
+    BN_bn2bin(n, bytes);
+    mpz_init(m);
+    mpz_import(m, sz, 1, 1, 0, 0, bytes);
+  }
 }
 
 
@@ -92,6 +114,19 @@ struct GMPKeyPair {
   GMPPrivateKey::Ptr GetPrivateKey() { return GMPPrivateKey::New(n, d, p, q, dmp1, dmq1, iqmp); }
   mpz_t n, e, d, p, q, dmp1, dmq1, iqmp;
 };
+
+GMPKeyPair::Ptr rsa_to_gmp(RSA *r) {
+  mpz_t n, e, d, p, q, dmp1, dmq1, iqmp;
+  bn_to_mpz(r->n, n);
+  bn_to_mpz(r->e, e);
+  bn_to_mpz(r->d, d);
+  bn_to_mpz(r->p, p);
+  bn_to_mpz(r->q, q);
+  bn_to_mpz(r->dmp1, dmp1);
+  bn_to_mpz(r->dmq1, dmq1);
+  bn_to_mpz(r->iqmp, iqmp);
+  return GMPKeyPair::New(n, e, d, p, q, dmp1, dmq1, iqmp);
+}
 
 static GMPKeyPair::Ptr gmp_keys;
 
@@ -286,7 +321,7 @@ string rsa_decrypt(GMPPrivateKey::Ptr key, const string msg) throw() {
   delete[] instr;
   string ret = out->substr(0, last + 1);
   delete out;
-  return ret;
+  return ltrim(ret, '\0');
 }
 
 size_t encrypted_size(size_t len, size_t bits) {
@@ -303,7 +338,7 @@ size_t decrypted_size(size_t len, size_t bits) {
   return blks*(bytes - 1);
 }
 
-template<size_t iterations, typename Callable> double benchmark(Callable fn) {
+template<typename Callable> double benchmark(int iterations, Callable fn) {
   clock_t start, end;
   start = clock();
   for (size_t i = 0; i < iterations; ++i) {
@@ -317,59 +352,174 @@ const char msg_cstr[] = "\0Lorem ipsum dolor sit amet";
 
 static RSA *rsa_keys;
 
+typedef enum {
+  ENCRYPT = 0x01,
+  DECRYPT,
+  GENERATE,
+  BENCHMARK
+} rsa_mode_t;
+
+static rsa_mode_t mode;
+
+static int passwd_callback(char *, int, int, void *) { return 0; }
+
+static char *base;
+
+#define MAX_ERROR_FORMAT_STRING_SIZE (1 << 16)
+
+
+void Die(const char *fmt) {
+  string out = base;
+  out += ": ";
+  out += fmt;
+  cerr << out << endl;
+  exit(1);
+}
+
+template <typename... T> void Die(const char *fmt, T... args) {
+  char buf[MAX_ERROR_FORMAT_STRING_SIZE];
+  sprintf(buf, fmt, args...);
+  string out = base;
+  out += ": ";
+  out += buf;
+  cerr << out << endl;
+  exit(1);
+}
+
+static int iterations = BENCHMARK_ITERATIONS;
+  
+
 int main(int argc, char **argv) {
+  base = basename(argv[0]);
   ctx = BN_CTX_new();
   srand(time(0));
   gmp_randinit_default(state);
   int c, option_index;
-  while ((c = getopt_long(argc, argv, "s:", long_options, &option_index)) != -1) {
+  char *key_filename;
+  char *output_filename;
+  char *input_filename;
+  bool silent;
+  opterr = 0;
+  while ((c = getopt_long(argc, argv, "i:o:s:n:x", long_options, &option_index)) != -1) {
     switch (c) {
+      case 'n':
+        iterations = atoi(optarg);
+        break;
       case 's':
         key_size = atoi(optarg);
+        break;
+      case 'i':
+        key_filename = optarg;
+        break;
+      case 'o':
+        output_filename = optarg;
+        break;
+      case 'x':
+        silent = true;
+        break;
+      case '?':
+        Die("invalid option -%c", optopt);
         break;
     }
   }
   gmp_randseed_ui(state, rand());
-  double key_generation_time_libgmp = benchmark<KEY_GENERATION_ITERATIONS>([] {
-    gmp_keys = generate_keys(DEFAULT_KEY_LENGTH);
-  });
-  e = BN_new();
-  BN_dec2bn(&e, "65537");
-  RSA *tmp = RSA_new();
-  double key_generation_time_openssl = benchmark<KEY_GENERATION_ITERATIONS>([tmp] {
-    RSA_generate_key_ex(tmp, DEFAULT_KEY_LENGTH, e, 0);
-  });
-  RSA_free(tmp);
-  rsa_keys = gmp_to_rsa(gmp_keys);
-  RSA_print_fp(stdout, rsa_keys, 0);
-//  gmp_printf("n: %Zd\ne: %Zd\nd: %Zd\n", gmp_keys->n, gmp_keys->e, gmp_keys->d);
-  string msg;
-  msg.append(msg_cstr, sizeof(msg_cstr));
-  cout << "== KEY GENERATION" << endl << "\tlibgmp: " << std::fixed << setprecision(0) << key_generation_time_libgmp << " cycles" << endl << "\topenssl: " << key_generation_time_openssl << " cycles" << endl;
-  cout << "== ENCRYPTION" << endl;
-  cout << "\tlibgmp: " << benchmark<ENCRYPTION_ITERATIONS>([msg] {
-    rsa_encrypt(gmp_keys->GetPublicKey(), msg);
-  }) << " cycles" << endl;
-  string ciphertext = rsa_encrypt(gmp_keys->GetPublicKey(), msg);
-  size_t encsz = encrypted_size(msg.size(), DEFAULT_KEY_LENGTH);
-  size_t blksz = ceil((double) msg.size()/(DEFAULT_KEY_LENGTH/8))*(DEFAULT_KEY_LENGTH/8);
-  unsigned char plaintext[blksz];
-  memset(plaintext, 0, sizeof(plaintext));
-  memcpy(plaintext, msg.c_str(), msg.size());
-  unsigned char encrypted[encsz];
-  size_t decsz = decrypted_size(encsz, DEFAULT_KEY_LENGTH);
-  unsigned char decrypted[decsz];
-  cout << "\topenssl: " << benchmark<ENCRYPTION_ITERATIONS>([&] {
-    RSA_public_encrypt(blksz, plaintext, encrypted, rsa_keys, RSA_NO_PADDING);
-  }) << " cycles" << endl;
-  cout << "== DECRYPTION" << endl;
-  cout << "\tlibgmp: " << benchmark<DECRYPTION_ITERATIONS>([&] {
-    rsa_decrypt(gmp_keys->GetPrivateKey(), ciphertext);
-  }) << " cycles" << endl;
-  cout << "\topenssl: " << benchmark<DECRYPTION_ITERATIONS>([&encsz, &encrypted, &decrypted] {
-    RSA_private_decrypt(encsz, encrypted, decrypted, rsa_keys, RSA_NO_PADDING);
-  }) << " cycles" << endl;
+  while (optind != argc) {
+    if (!mode) {
+      if (!strcmp(argv[optind], "encrypt")) { mode = ENCRYPT; }
+      else if (!strcmp(argv[optind], "verify")) mode = ENCRYPT;
+      else if (!strcmp(argv[optind], "decrypt") || !strcmp(argv[optind], "sign")) mode = DECRYPT;
+      else if (!strcmp(argv[optind], "generate")) mode = GENERATE;
+      else if (!strcmp(argv[optind], "benchmark")) mode = BENCHMARK;
+    } else input_filename = argv[optind];
+    optind++;
+  }
+  if (!mode) Die("no mode selected");
+  if (mode == BENCHMARK) {
+		double key_generation_time_libgmp = benchmark(iterations, [] {
+			gmp_keys = generate_keys(key_size);
+		});
+		e = BN_new();
+		BN_dec2bn(&e, "65537");
+		RSA *tmp = RSA_new();
+		double key_generation_time_openssl = benchmark(iterations, [tmp] {
+			RSA_generate_key_ex(tmp, key_size, e, 0);
+		});
+		RSA_free(tmp);
+		rsa_keys = gmp_to_rsa(gmp_keys);
+		RSA_print_fp(stdout, rsa_keys, 0);
+		string msg;
+		msg.append(msg_cstr, sizeof(msg_cstr));
+		cout << "== KEY GENERATION" << endl << "\tlibgmp: " << std::fixed << setprecision(0) << key_generation_time_libgmp << " cycles" << endl << "\topenssl: " << key_generation_time_openssl << " cycles" << endl;
+		cout << "== ENCRYPTION" << endl;
+		cout << "\tlibgmp: " << benchmark(iterations, [msg] {
+			rsa_encrypt(gmp_keys->GetPublicKey(), msg);
+		}) << " cycles" << endl;
+		string ciphertext = rsa_encrypt(gmp_keys->GetPublicKey(), msg);
+		size_t encsz = encrypted_size(msg.size(), DEFAULT_KEY_LENGTH);
+		size_t blksz = ceil((double) msg.size()/(DEFAULT_KEY_LENGTH/8))*(DEFAULT_KEY_LENGTH/8);
+		unsigned char plaintext[blksz];
+		memset(plaintext, 0, sizeof(plaintext));
+		memcpy(plaintext, msg.c_str(), msg.size());
+		unsigned char encrypted[encsz];
+		size_t decsz = decrypted_size(encsz, DEFAULT_KEY_LENGTH);
+		unsigned char decrypted[decsz];
+		cout << "\topenssl: " << benchmark(iterations, [&] {
+			RSA_public_encrypt(blksz, plaintext, encrypted, rsa_keys, RSA_NO_PADDING);
+		}) << " cycles" << endl;
+		cout << "== DECRYPTION" << endl;
+		cout << "\tlibgmp: " << benchmark(iterations, [&] {
+			rsa_decrypt(gmp_keys->GetPrivateKey(), ciphertext);
+		}) << " cycles" << endl;
+		cout << "\topenssl: " << benchmark(iterations, [&encsz, &encrypted, &decrypted] {
+			RSA_private_decrypt(encsz, encrypted, decrypted, rsa_keys, RSA_NO_PADDING);
+		}) << " cycles" << endl;
+	} else if (mode == GENERATE) {
+    GMPKeyPair::Ptr keypair = generate_keys(key_size);
+		rsa_keys = gmp_to_rsa(keypair);
+    if (!silent) RSA_print_fp(stdout, rsa_keys, 0);
+    FILE *fppriv = fopen(output_filename, "wt");
+    FILE *fppub = fopen((string(output_filename) + ".pub").c_str(), "wt");
+    PEM_write_RSAPrivateKey(fppriv, rsa_keys, NULL, NULL, 0, NULL, NULL);
+    PEM_write_RSAPublicKey(fppub, rsa_keys);
+    RSA_free(rsa_keys);
+    fclose(fppub);
+    fclose(fppriv);
+  } else if (mode == ENCRYPT) {
+    rsa_keys = RSA_new();
+    FILE *fp = fopen(key_filename, "r");
+    PEM_read_RSAPublicKey(fp, &rsa_keys, NULL, NULL); //PublicKey(fp, &rsa_keys, passwd_callback, buf);
+    //PEM_read_RSAPrivateKey(fp, &rsa_keys, passwd_callback, buf);
+    //PEM_read_RSAPrivateKey(fp, &rsa_keys, NULL, NULL);
+    //ERR_print_errors_fp(stdout);
+    fclose(fp);
+    mpz_t n, e;
+    bn_to_mpz(rsa_keys->n, n);
+    bn_to_mpz(rsa_keys->e, e);
+    GMPPublicKey::Ptr key = GMPPublicKey::New(n, e);
+    RSA_free(rsa_keys);
+    ifstream t(input_filename);
+    string plaintext ((istreambuf_iterator<char>(t)), istreambuf_iterator<char>());
+    if (output_filename) {
+      ofstream out(output_filename);
+      out << rsa_encrypt(key, plaintext);
+    } else {
+      cout << rsa_encrypt(key, plaintext);
+    }
+  } else if (mode == DECRYPT) {
+    rsa_keys = RSA_new();
+    FILE *fp = fopen(key_filename, "r");
+    PEM_read_RSAPrivateKey(fp, &rsa_keys, NULL, NULL);
+    fclose(fp);
+    GMPKeyPair::Ptr keypair = rsa_to_gmp(rsa_keys);
+    RSA_free(rsa_keys);
+    ifstream t(input_filename);
+    string plaintext ((istreambuf_iterator<char>(t)), istreambuf_iterator<char>());
+    if (output_filename) {
+      ofstream out(output_filename);
+      out << rsa_decrypt(keypair->GetPrivateKey(), plaintext);
+    } else cout << rsa_decrypt(keypair->GetPrivateKey(), plaintext);
+  }
   gmp_randclear(state);
   BN_CTX_free(ctx);
-  return 0;
+	return 0;
 }
