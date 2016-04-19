@@ -455,8 +455,8 @@ int main(int argc, char **argv) {
 			rsa_encrypt(gmp_keys->GetPublicKey(), msg);
 		}) << " cycles" << endl;
 		string ciphertext = rsa_encrypt(gmp_keys->GetPublicKey(), msg);
-		size_t encsz = encrypted_size(msg.size(), DEFAULT_KEY_LENGTH);
-		size_t blksz = ceil((double) msg.size()/(DEFAULT_KEY_LENGTH/8))*(DEFAULT_KEY_LENGTH/8);
+		size_t encsz = encrypted_size(msg.size(), key_size);
+		size_t blksz = ceil((double) msg.size()/(key_size/8))*(key_size/8);
 		unsigned char plaintext[blksz];
 		memset(plaintext, 0, sizeof(plaintext));
 		memcpy(plaintext, msg.c_str(), msg.size());
@@ -465,6 +465,7 @@ int main(int argc, char **argv) {
 		unsigned char decrypted[decsz];
 		cout << "\topenssl: " << benchmark(iterations, [&] {
 			RSA_public_encrypt(blksz, plaintext, encrypted, rsa_keys, RSA_NO_PADDING);
+      ERR_print_errors_fp(stdout);
 		}) << " cycles" << endl;
 		cout << "== DECRYPTION" << endl;
 		cout << "\tlibgmp: " << benchmark(iterations, [&] {
