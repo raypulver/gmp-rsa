@@ -434,10 +434,12 @@ void PrintNonsense() {
 
 template <typename Callable> void PrintNonsenseWhile(Callable fn) {
   future<int> fut = async(launch::async, [&] () -> int { fn(); return 1; });
+  if (fut.wait_for(chrono::milliseconds(50)) == future_status::ready) return;
   while (fut.wait_for(chrono::milliseconds(50)) != future_status::ready) {
     PrintNonsense();
   }
   fut.get();
+  cout << endl;
 }
 
 int main(int argc, char **argv) {
@@ -559,11 +561,18 @@ int main(int argc, char **argv) {
     RSA_free(rsa_keys);
     ifstream t(input_filename);
     string plaintext ((istreambuf_iterator<char>(t)), istreambuf_iterator<char>());
+    string out_string;
     if (output_filename) {
       ofstream out(output_filename);
-      out << rsa_encrypt(key, plaintext);
+      PrintNonsenseWhile([&] () {
+        out_string = rsa_encrypt(key, plaintext);
+      });
+      out << out_string;
     } else {
-      cout << rsa_encrypt(key, plaintext);
+      PrintNonsenseWhile([&] () {
+        out_string = rsa_encrypt(key, plaintext);
+      });
+      cout << out_string;
     }
   } else if (mode == DECRYPT) {
     rsa_keys = RSA_new();
@@ -574,10 +583,19 @@ int main(int argc, char **argv) {
     RSA_free(rsa_keys);
     ifstream t(input_filename);
     string plaintext ((istreambuf_iterator<char>(t)), istreambuf_iterator<char>());
+    string out_string;
     if (output_filename) {
       ofstream out(output_filename);
-      out << rsa_decrypt(keypair->GetPrivateKey(), plaintext);
-    } else cout << rsa_decrypt(keypair->GetPrivateKey(), plaintext);
+      PrintNonsenseWhile([&] () {
+        out_string = rsa_decrypt(keypair->GetPrivateKey(), plaintext);
+      });
+      out << out_string;
+    } else {
+      PrintNonsenseWhile([&] () {
+        out_string = rsa_decrypt(keypair->GetPrivateKey(), plaintext);
+      });
+      cout << out_string;
+    }
   }
   gmp_randclear(state);
   BN_CTX_free(ctx);
