@@ -1,8 +1,10 @@
 #include <memory>
+#include <future>
 #include <string>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <unistd.h>
 #include <algorithm>
 #include <openssl/rsa.h>
 #include <openssl/engine.h>
@@ -11,11 +13,14 @@
 #include <fstream>
 #include <streambuf>
 #include <iomanip>
+#include <thread>
+#include <mutex>
 #include <getopt.h>
 #include <libgen.h>
 #include <gmp.h>
 
 using namespace std;
+
 
 namespace {
   gmp_randstate_t state;
@@ -365,6 +370,7 @@ static int passwd_callback(char *, int, int, void *) { return 0; }
 
 static char *base;
 
+
 #define MAX_ERROR_FORMAT_STRING_SIZE (1 << 16)
 
 
@@ -388,6 +394,43 @@ template <typename... T> void Die(const char *fmt, T... args) {
 
 static int iterations = BENCHMARK_ITERATIONS;
   
+static mutex global_mutex;
+
+static char nonsense_char;
+static char char_before_last;
+static char char_before_that;
+
+static thread *thread_ptr;
+
+void PrintNonsense() {
+  double c = (double) rand()/RAND_MAX;
+  char_before_that = char_before_last;
+  char_before_last = nonsense_char;
+  if (!nonsense_char) nonsense_char = '$';
+  if (nonsense_char == '-' && char_before_that == '.') {
+    cout << (nonsense_char = '*');
+  } else if (nonsense_char == '-' && char_before_that == '*') { cout << (nonsense_char = '.'); }
+  else if (nonsense_char == '.' || nonsense_char == '*') {
+    if (c < 0.9) cout << (nonsense_char = '-');
+    else if (c < 0.95) cout << (nonsense_char = '%');
+    else if (c < 0.975) cout << (nonsense_char = '$');
+    else if (c < 0.985) cout << (nonsense_char = '@');
+    else cout << (nonsense_char = '#');
+  } else {
+    if (c < 0.5) {
+      cout << nonsense_char;
+    } else if (c < 0.7) {
+      cout << (nonsense_char = '%');
+    } else if (c < 0.8) {
+      cout << (nonsense_char = '#');
+    } else if (c < 0.95) {
+      cout << (nonsense_char = '@');
+    } else if (c < 0.97) {
+      cout << (nonsense_char = '.');
+    } else cout << (char_before_last = '.', nonsense_char = '-');
+  }
+  cout.flush();
+}
 
 int main(int argc, char **argv) {
   base = basename(argv[0]);
@@ -475,8 +518,13 @@ int main(int argc, char **argv) {
 			RSA_private_decrypt(encsz, encrypted, decrypted, rsa_keys, RSA_NO_PADDING);
 		}) << " cycles" << endl;
 	} else if (mode == GENERATE) {
-    GMPKeyPair::Ptr keypair = generate_keys(key_size);
-		rsa_keys = gmp_to_rsa(keypair);
+    future<GMPKeyPair::Ptr> keypair_future = async(launch::async, [] () -> GMPKeyPair::Ptr { GMPKeyPair::Ptr keys = generate_keys(key_size); return keys; });
+    while (keypair_future.wait_for(chrono::milliseconds(50)) != future_status::ready) {
+      PrintNonsense();
+    }
+    cout << endl;
+    GMPKeyPair::Ptr keypair = keypair_future.get();
+    rsa_keys = gmp_to_rsa(keypair);
     if (!silent) RSA_print_fp(stdout, rsa_keys, 0);
     FILE *fppriv = fopen(output_filename, "wt");
     FILE *fppub = fopen((string(output_filename) + ".pub").c_str(), "wt");
