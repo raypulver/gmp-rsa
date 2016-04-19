@@ -432,6 +432,14 @@ void PrintNonsense() {
   cout.flush();
 }
 
+template <typename Callable> void PrintNonsenseWhile(Callable fn) {
+  future<int> fut = async(launch::async, [&] () -> int { fn(); return 1; });
+  while (fut.wait_for(chrono::milliseconds(50)) != future_status::ready) {
+    PrintNonsense();
+  }
+  fut.get();
+}
+
 int main(int argc, char **argv) {
   base = basename(argv[0]);
   ctx = BN_CTX_new();
@@ -478,16 +486,19 @@ int main(int argc, char **argv) {
   }
   if (!mode) Die("no mode selected");
   if (mode == BENCHMARK) {
-		double key_generation_time_libgmp = benchmark(iterations, [] {
+    volatile double key_generation_time_libgmp, key_generation_time_openssl;
+    PrintNonsenseWhile([&] {
+		key_generation_time_libgmp = benchmark(iterations, [] {
 			gmp_keys = generate_keys(key_size);
 		});
 		e = BN_new();
 		BN_dec2bn(&e, "65537");
 		RSA *tmp = RSA_new();
-		double key_generation_time_openssl = benchmark(iterations, [tmp] {
+		key_generation_time_openssl = benchmark(iterations, [tmp] {
 			RSA_generate_key_ex(tmp, key_size, e, 0);
 		});
 		RSA_free(tmp);
+              });
 		rsa_keys = gmp_to_rsa(gmp_keys);
 		RSA_print_fp(stdout, rsa_keys, 0);
 		string msg;
